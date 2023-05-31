@@ -1,13 +1,13 @@
-use argparse::{ArgumentParser, StoreTrue, Store};
+use argparse::{ArgumentParser, Store, StoreTrue};
 use flate2::read::GzDecoder;
-use std::fs::File;
-use std::io::{Read};
-use std::path::PathBuf;
-use tar::Archive;
-use tokio::fs;
 use log::{info, LevelFilter};
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
+use tar::Archive;
+use tokio::fs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,19 +16,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input_path = String::new();
     {
         let mut parser = ArgumentParser::new();
-        parser.set_description("Unitypackage extractor");
-        parser.refer(&mut verbose)
+        parser.set_description("Unity package extractor");
+        parser
+            .refer(&mut verbose)
             .add_option(&["-v"], StoreTrue, "Verbose mode");
-        parser.refer(&mut input_path)
-            .add_argument("input", Store, "Unitypackage (.tar.gz) file")
+        parser
+            .refer(&mut input_path)
+            .add_argument("input", Store, "*.unitypackage file")
             .required();
         parser.parse_args_or_exit();
     }
 
     if verbose {
-        SimpleLogger::new().with_level(LevelFilter::Info).init().unwrap();
+        SimpleLogger::new()
+            .with_level(LevelFilter::Info)
+            .init()
+            .unwrap();
     } else {
-        SimpleLogger::new().with_level(LevelFilter::Error).init().unwrap();
+        SimpleLogger::new()
+            .with_level(LevelFilter::Error)
+            .init()
+            .unwrap();
     }
 
     // Open the unitypackage file
