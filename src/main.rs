@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             entry.read_to_string(&mut pathname)?;
 
             // Sanitize the pathname
-            let pathname = pathname.trim().replace("\\", "/");
+            let pathname = pathname.trim().replace('\\', "/");
             let target_path = PathBuf::from(&pathname);
 
             // Create directories for the target path
