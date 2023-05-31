@@ -111,8 +111,6 @@ jobs:
         run: |
           set -ex
 
-          rm -rf tmp
-          mkdir tmp
           mkdir dist
 
           for dir in bins-* ; do
@@ -122,16 +120,8 @@ jobs:
                   exe=".exe"
               fi
               pkgname=$PROJECT_NAME-$TAG-$platform
-              mkdir tmp/$pkgname
-              # cp LICENSE README.md tmp/$pkgname
-              mv bins-$platform/$BIN_NAME$exe tmp/$pkgname
-              chmod +x tmp/$pkgname/$BIN_NAME$exe
-
-              if [ "$exe" = "" ]; then
-                  tar cJf dist/$pkgname.tar.xz -C tmp $pkgname
-              else
-                  (cd tmp && 7z a -r ../dist/$pkgname.zip $pkgname)
-              fi
+              mv bins-$platform/$BIN_NAME$exe dist/$pkgname$exe
+              chmod +x dist/$pkgname$exe
           done
 
       - name: Upload binaries to release
