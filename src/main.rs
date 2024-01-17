@@ -1,6 +1,6 @@
 use argparse::{ArgumentParser, Store, StoreTrue};
 use flate2::read::GzDecoder;
-use log::{info, LevelFilter};
+use log::{info, error, LevelFilter};
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::fs::File;
@@ -73,9 +73,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Write the asset data to the target path
             let asset_path = path.parent().unwrap().join("asset");
             if let Some(asset_data) = assets.remove(&asset_path) {
-                fs::write(&target_path, &asset_data).await?;
-
-                info!("Extracted: {}", pathname);
+                if let Err(e) = fs::write(&target_path, &asset_data).await {
+                    error!("Failed to extract file: {:?}, error: {:?}", &target_path, e)
+                }
+                else {
+                    info!("Extracted: {}", pathname);
+                }
             }
         }
     }
