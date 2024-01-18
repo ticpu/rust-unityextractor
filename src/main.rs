@@ -1,25 +1,43 @@
-use argparse::{ArgumentParser, Store, StoreTrue};
-use flate2::read::GzDecoder;
-use log::{info, LevelFilter};
-use simple_logger::SimpleLogger;
 use std::collections::HashMap;
-use std::fs::File;
+use std::ffi::OsString;
 use std::io::Read;
-use std::path::PathBuf;
-use tar::Archive;
-use tokio::fs;
+use std::path::{Path, PathBuf};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Parse command-line arguments
-    let mut verbose = false;
+use argparse::{ArgumentParser, IncrBy, Store};
+use flate2::read::GzDecoder;
+use log::{debug, error, info, trace, warn, LevelFilter};
+use simple_logger::SimpleLogger;
+use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
+use tokio::{fs, io};
+
+struct Config {
+    input_path: String,
+    log_level: LevelFilter,
+}
+
+const TRIM_CHARS: &[char] = &['\0', ' ', '\n', '\t', '\r', '/', '.'];
+
+type AssetMap = HashMap<PathBuf, Vec<u8>>;
+type FolderMap = HashMap<OsString, bool>;
+type ExtractTask = Vec<JoinHandle<Result<(), io::Error>>>;
+
+fn parse_arguments() -> Config {
+    let mut verbose = 0;
+    let mut quiet = 0;
     let mut input_path = String::new();
+
     {
         let mut parser = ArgumentParser::new();
         parser.set_description("Unity package extractor");
+        parser.refer(&mut quiet).add_option(
+            &["-q"],
+            IncrBy(1),
+            "decrease verbosity, hide warnings.",
+        );
         parser
             .refer(&mut verbose)
-            .add_option(&["-v"], StoreTrue, "Verbose mode");
+            .add_option(&["-v"], IncrBy(1), "increase verbosity; up to 3.");
         parser
             .refer(&mut input_path)
             .add_argument("input", Store, "*.unitypackage file")
@@ -27,58 +45,175 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         parser.parse_args_or_exit();
     }
 
-    if verbose {
-        SimpleLogger::new()
-            .with_level(LevelFilter::Info)
-            .init()
-            .unwrap();
+    let log_level = match verbose - quiet {
+        ..=-1 => LevelFilter::Error,
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
+        3.. => LevelFilter::Trace,
+    };
+
+    Config {
+        input_path,
+        log_level,
+    }
+}
+
+fn sanitize_path(path: &str) -> Result<String, io::Error> {
+    let sanitized_path = path.trim_matches(TRIM_CHARS).replace('\\', "/");
+
+    if sanitized_path.contains("..") {
+        warn!("path «{}» contains .., this isn't supported", path);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Path contains invalid '..'",
+        ));
+    }
+
+    Ok(sanitized_path)
+}
+
+fn read_asset_to_memory<R: Read>(
+    assets: &mut AssetMap,
+    mut entry: tar::Entry<'_, R>,
+    path: PathBuf,
+) -> Result<(), io::Error> {
+    debug!("reading asset to memory «{:?}»", path);
+    let mut asset_data = Vec::new();
+    entry.read_to_end(&mut asset_data)?;
+    trace!(
+        "saving «{:?}» with {} bytes to memory",
+        path,
+        asset_data.len(),
+    );
+    assets.insert(path, asset_data);
+    Ok(())
+}
+
+fn check_for_folders<R: Read>(
+    folders: &mut FolderMap,
+    mut entry: tar::Entry<'_, R>,
+    path: PathBuf,
+) -> Result<(), io::Error> {
+    debug!("reading asset to memory «{:?}»", path);
+    let mut metadata = String::new();
+    entry.read_to_string(&mut metadata)?;
+    if metadata.contains("folderAsset: yes\n") {
+        folders.insert(path.into_os_string(), true);
+    }
+    Ok(())
+}
+
+fn read_destination_path_and_write<R: Read>(
+    assets: &mut AssetMap,
+    folders: &FolderMap,
+    tasks: &mut ExtractTask,
+    mut entry: tar::Entry<'_, R>,
+    path: PathBuf,
+) -> Result<(), io::Error> {
+    let mut path_name = String::new();
+    entry.read_to_string(&mut path_name)?;
+
+    let asset_path = path.parent().unwrap().join("asset");
+    if let Some(asset_data) = assets.remove(&asset_path) {
+        tasks.push(tokio::spawn(write_asset_to_pathname(
+            asset_data,
+            path.clone(),
+            path_name,
+        )));
     } else {
-        SimpleLogger::new()
-            .with_level(LevelFilter::Error)
-            .init()
-            .unwrap();
+        let path_string = path.into_os_string();
+        if folders.contains_key(&path_string) {
+            warn!("no asset data found for «{}»", path_name.escape_default());
+        }
+    }
+    Ok(())
+}
+
+async fn write_asset_to_pathname(
+    asset_data: Vec<u8>,
+    entry_hash: PathBuf,
+    path_name: String,
+) -> Result<(), io::Error> {
+    let target_path = sanitize_path(&path_name)?;
+
+    if path_name != target_path {
+        debug!(
+            "sanitizing path «{}» => «{}»",
+            path_name.escape_default(),
+            target_path.escape_default(),
+        );
     }
 
-    // Open the unitypackage file
-    let file = File::open(&input_path)?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
-    let mut assets: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    if let Some(parent) = Path::new(&target_path).parent() {
+        fs::create_dir_all(parent).await?;
+    }
 
-    // Iterate over each entry in the archive
+    info!("extracting: «{:?}» to «{}»", entry_hash, target_path);
+    let file = fs::File::create(&target_path).await?;
+    let mut file_writer = io::BufWriter::new(file);
+    file_writer.write_all(&asset_data).await?;
+    file_writer.flush().await?;
+
+    trace!("done extracting «{:?}»", entry_hash);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = parse_arguments();
+    SimpleLogger::new().with_level(config.log_level).init()?;
+    debug!("opening unitypackage file at {}", &config.input_path);
+
+    let file = std::fs::File::open(&config.input_path);
+
+    if let Err(err) = file {
+        error!("cannot open file at {}: {}", config.input_path, err);
+        std::process::exit(2);
+    }
+
+    let decoder = GzDecoder::new(file?);
+    let mut archive = tar::Archive::new(decoder);
+    let mut assets: AssetMap = HashMap::new();
+    let mut folders: FolderMap = HashMap::new();
+    let mut tasks: ExtractTask = Vec::new();
+
+    debug!("iterating archive's entries");
     for entry_result in archive.entries()? {
-        let mut entry = entry_result?;
-        let path = entry.path()?.to_path_buf();
+        let entry = match entry_result {
+            Ok(file) => file,
+            Err(e) => {
+                warn!("error reading entry from archive: {}", e);
+                continue;
+            }
+        };
 
-        // If the entry is an 'asset' file, read its content
+        let path = match entry.path() {
+            Ok(p) => p.to_path_buf(),
+            Err(e) => {
+                warn!("errors reading path from entry: {}", e);
+                continue;
+            }
+        };
+
         if path.ends_with("asset") {
-            let mut asset_data = Vec::new();
-            entry.read_to_end(&mut asset_data)?;
-            assets.insert(path.clone(), asset_data);
-        }
-        // If the entry is a 'pathname' file, read its content and write the asset
-        else if path.ends_with("pathname") {
-            let mut pathname = String::new();
-            entry.read_to_string(&mut pathname)?;
-
-            // Sanitize the pathname
-            let pathname = pathname.trim().replace('\\', "/");
-            let target_path = PathBuf::from(&pathname);
-
-            // Create directories for the target path
-            if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-
-            // Write the asset data to the target path
-            let asset_path = path.parent().unwrap().join("asset");
-            if let Some(asset_data) = assets.remove(&asset_path) {
-                fs::write(&target_path, &asset_data).await?;
-
-                info!("Extracted: {}", pathname);
-            }
+            read_asset_to_memory(&mut assets, entry, path)?;
+        } else if path.ends_with("asset.meta") {
+            check_for_folders(&mut folders, entry, path)?;
+        } else if path.ends_with("pathname") {
+            read_destination_path_and_write(&mut assets, &folders, &mut tasks, entry, path)?;
+        } else {
+            trace!("skipping entry with name «{:?}»", path)
         }
     }
+
+    debug!("end of archive");
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!("an extraction task has failed: {}", e);
+        }
+    }
+    info!("done");
 
     Ok(())
 }
