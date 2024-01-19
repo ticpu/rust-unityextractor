@@ -11,12 +11,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 use tokio::{fs, io};
 
+mod sanitize_path;
+
 struct Config {
     input_path: String,
     log_level: LevelFilter,
 }
-
-const TRIM_CHARS: &[char] = &['\0', ' ', '\n', '\t', '\r', '/', '.'];
 
 type AssetMap = HashMap<PathBuf, Vec<u8>>;
 type FolderMap = HashMap<OsString, bool>;
@@ -57,20 +57,6 @@ fn parse_arguments() -> Config {
         input_path,
         log_level,
     }
-}
-
-fn sanitize_path(path: &str) -> Result<String, io::Error> {
-    let sanitized_path = path.trim_matches(TRIM_CHARS).replace('\\', "/");
-
-    if sanitized_path.contains("..") {
-        warn!("path «{}» contains .., this isn't supported", path);
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Path contains invalid '..'",
-        ));
-    }
-
-    Ok(sanitized_path)
 }
 
 fn read_asset_to_memory<R: Read>(
@@ -135,7 +121,7 @@ async fn write_asset_to_pathname(
     entry_hash: PathBuf,
     path_name: String,
 ) -> Result<(), io::Error> {
-    let target_path = sanitize_path(&path_name)?;
+    let target_path = sanitize_path::sanitize_path(&path_name)?;
 
     if path_name != target_path {
         debug!(
