@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ struct Config {
 }
 
 type AssetMap = HashMap<PathBuf, Vec<u8>>;
-type FolderMap = HashMap<OsString, bool>;
+type FolderSet = HashSet<OsString>;
 type ExtractTask = Vec<JoinHandle<Result<(), io::Error>>>;
 
 fn parse_arguments() -> Config {
@@ -64,11 +64,11 @@ fn read_asset_to_memory<R: Read>(
     mut entry: tar::Entry<'_, R>,
     path: PathBuf,
 ) -> Result<(), io::Error> {
-    debug!("reading asset to memory «{:?}»", path);
+    debug!("reading asset to memory {:?}", path);
     let mut asset_data = Vec::new();
     entry.read_to_end(&mut asset_data)?;
     trace!(
-        "saving «{:?}» with {} bytes to memory",
+        "saving {:?} with {} bytes to memory",
         path,
         asset_data.len(),
     );
@@ -77,22 +77,22 @@ fn read_asset_to_memory<R: Read>(
 }
 
 fn check_for_folders<R: Read>(
-    folders: &mut FolderMap,
+    folders: &mut FolderSet,
     mut entry: tar::Entry<'_, R>,
     path: PathBuf,
 ) -> Result<(), io::Error> {
-    debug!("reading asset to memory «{:?}»", path);
+    debug!("reading asset to memory {:?}", path);
     let mut metadata = String::new();
     entry.read_to_string(&mut metadata)?;
     if metadata.contains("folderAsset: yes\n") {
-        folders.insert(path.into_os_string(), true);
+        folders.insert(path.into_os_string());
     }
     Ok(())
 }
 
 fn read_destination_path_and_write<R: Read>(
     assets: &mut AssetMap,
-    folders: &FolderMap,
+    folders: &FolderSet,
     tasks: &mut ExtractTask,
     mut entry: tar::Entry<'_, R>,
     path: PathBuf,
@@ -104,13 +104,13 @@ fn read_destination_path_and_write<R: Read>(
     if let Some(asset_data) = assets.remove(&asset_path) {
         tasks.push(tokio::spawn(write_asset_to_pathname(
             asset_data,
-            path.clone(),
+            path.to_string_lossy().to_string(),
             path_name,
         )));
     } else {
         let path_string = path.into_os_string();
-        if folders.contains_key(&path_string) {
-            warn!("no asset data found for «{}»", path_name.escape_default());
+        if folders.contains(&path_string) {
+            warn!("no asset data found for {}", path_name.escape_default());
         }
     }
     Ok(())
@@ -118,30 +118,35 @@ fn read_destination_path_and_write<R: Read>(
 
 async fn write_asset_to_pathname(
     asset_data: Vec<u8>,
-    entry_hash: PathBuf,
+    entry_hash: String,
     path_name: String,
 ) -> Result<(), io::Error> {
     let target_path = sanitize_path::sanitize_path(&path_name)?;
+    let asset_hash: &str;
+
+    match entry_hash.find('/') {
+        Some(idx) => {
+            (asset_hash, _) = entry_hash.split_at(idx);
+        }
+        None => {
+            asset_hash = &entry_hash;
+        }
+    }
 
     if path_name != target_path {
-        debug!(
-            "sanitizing path «{}» => «{}»",
-            path_name.escape_default(),
-            target_path.escape_default(),
-        );
+        debug!("sanitizing path {:?} => {:?}", path_name, target_path,);
     }
 
     if let Some(parent) = Path::new(&target_path).parent() {
         fs::create_dir_all(parent).await?;
     }
 
-    info!("extracting: «{:?}» to «{}»", entry_hash, target_path);
+    info!("extracting {} to {:?}", asset_hash, target_path);
     let file = fs::File::create(&target_path).await?;
     let mut file_writer = io::BufWriter::new(file);
     file_writer.write_all(&asset_data).await?;
     file_writer.flush().await?;
-
-    trace!("done extracting «{:?}»", entry_hash);
+    trace!("{} is written to disk", asset_hash);
     Ok(())
 }
 
@@ -150,7 +155,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_arguments();
     SimpleLogger::new().with_level(config.log_level).init()?;
     debug!("opening unitypackage file at {}", &config.input_path);
-
     let file = std::fs::File::open(&config.input_path);
 
     if let Err(err) = file {
@@ -161,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(file?);
     let mut archive = tar::Archive::new(decoder);
     let mut assets: AssetMap = HashMap::new();
-    let mut folders: FolderMap = HashMap::new();
+    let mut folders: FolderSet = HashSet::new();
     let mut tasks: ExtractTask = Vec::new();
 
     debug!("iterating archive's entries");
@@ -188,8 +192,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             check_for_folders(&mut folders, entry, path)?;
         } else if path.ends_with("pathname") {
             read_destination_path_and_write(&mut assets, &folders, &mut tasks, entry, path)?;
+        } else if path.ends_with("/") {
+            trace!("skipping folder {}", path.display());
         } else {
-            trace!("skipping entry with name «{:?}»", path)
+            trace!("skipping entry with name {}", path.display())
         }
     }
 
