@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
+use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -18,9 +19,20 @@ struct Config {
     log_level: LevelFilter,
 }
 
+struct AssetWriteError {
+    error: io::Error,
+    path: String,
+}
+
+impl fmt::Display for AssetWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {}", self.path, self.error)
+    }
+}
+
 type AssetMap = HashMap<PathBuf, Vec<u8>>;
 type FolderSet = HashSet<OsString>;
-type ExtractTask = Vec<JoinHandle<Result<(), io::Error>>>;
+type ExtractTask = Vec<JoinHandle<Result<(), AssetWriteError>>>;
 
 fn parse_arguments() -> Config {
     let mut verbose = 0;
@@ -102,11 +114,9 @@ fn read_destination_path_and_write<R: Read>(
 
     let asset_path = path.parent().unwrap().join("asset");
     if let Some(asset_data) = assets.remove(&asset_path) {
-        tasks.push(tokio::spawn(write_asset_to_pathname(
-            asset_data,
-            path.to_string_lossy().to_string(),
-            path_name,
-        )));
+        tasks.push(tokio::spawn(async move {
+            write_asset_to_pathname(asset_data, path.to_string_lossy().to_string(), path_name).await
+        }));
     } else {
         let path_string = path.into_os_string();
         if folders.contains(&path_string) {
@@ -120,8 +130,12 @@ async fn write_asset_to_pathname(
     asset_data: Vec<u8>,
     entry_hash: String,
     path_name: String,
-) -> Result<(), io::Error> {
-    let target_path = sanitize_path::sanitize_path(&path_name)?;
+) -> Result<(), AssetWriteError> {
+    let to_asset_error = |error: io::Error| AssetWriteError {
+        error,
+        path: path_name.clone(),
+    };
+    let target_path = sanitize_path::sanitize_path(&path_name).map_err(to_asset_error)?;
     let asset_hash: &str;
 
     match entry_hash.find('/') {
@@ -134,18 +148,23 @@ async fn write_asset_to_pathname(
     }
 
     if path_name != target_path {
-        debug!("sanitizing path {:?} => {:?}", path_name, target_path,);
+        debug!("sanitizing path {:?} => {:?}", path_name, target_path);
     }
 
     if let Some(parent) = Path::new(&target_path).parent() {
-        fs::create_dir_all(parent).await?;
+        fs::create_dir_all(parent).await.map_err(to_asset_error)?;
     }
 
     info!("extracting {} to {:?}", asset_hash, target_path);
-    let file = fs::File::create(&target_path).await?;
+    let file = fs::File::create(&target_path)
+        .await
+        .map_err(to_asset_error)?;
     let mut file_writer = io::BufWriter::new(file);
-    file_writer.write_all(&asset_data).await?;
-    file_writer.flush().await?;
+    file_writer
+        .write_all(&asset_data)
+        .await
+        .map_err(to_asset_error)?;
+    file_writer.flush().await.map_err(to_asset_error)?;
     trace!("{} is written to disk", asset_hash);
     Ok(())
 }
@@ -201,8 +220,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     debug!("end of archive");
     for task in tasks {
-        if let Err(e) = task.await {
-            warn!("an extraction task has failed: {}", e);
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!("failed to write asset: {}", e);
+            }
+            Err(e) => {
+                warn!("an extraction task has failed: {}", e);
+            }
         }
     }
     info!("done");
