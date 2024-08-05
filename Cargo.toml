@@ -1,14 +1,14 @@
 [package]
 name = "rust-unityextractor"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-argparse = "0.2.2"
-flate2 = "1.0.20"
-tar = "0.4.36"
-tokio = { version = "1.12.0", features = ["full"] }
-log = "0.4.14"
-simple_logger = "4.1.0"
+argparse = "0.2"
+flate2 = "1.0"
+tar = "0.4"
+tokio = { version = "1.39", features = ["full"] }
+log = "0.4"
+simple_logger = "5"
