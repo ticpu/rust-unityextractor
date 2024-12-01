@@ -1,7 +1,3 @@
-Certainly! Below is a README template for your Unity package extractor tool, suitable for a GitHub repository:
-
----
-
 # Unity Package Extractor
 
 Unity Package Extractor is a Rust-based tool designed to efficiently extract assets from `.unitypackage` files.
