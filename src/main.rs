@@ -76,7 +76,7 @@ fn read_asset_to_memory<R: Read>(
     mut entry: tar::Entry<'_, R>,
     path: PathBuf,
 ) -> Result<(), io::Error> {
-    debug!("reading asset to memory {:?}", path);
+    debug!("reading asset to memory {path:?}");
     let mut asset_data = Vec::new();
     entry.read_to_end(&mut asset_data)?;
     trace!(
@@ -93,7 +93,7 @@ fn check_for_folders<R: Read>(
     mut entry: tar::Entry<'_, R>,
     path: PathBuf,
 ) -> Result<(), io::Error> {
-    debug!("reading asset to memory {:?}", path);
+    debug!("reading asset to memory {path:?}");
     let mut metadata = String::new();
     entry.read_to_string(&mut metadata)?;
     if metadata.contains("folderAsset: yes\n") {
@@ -148,14 +148,14 @@ async fn write_asset_to_pathname(
     }
 
     if path_name != target_path {
-        debug!("sanitizing path {:?} => {:?}", path_name, target_path);
+        debug!("sanitizing path {path_name:?} => {target_path:?}");
     }
 
     if let Some(parent) = Path::new(&target_path).parent() {
         fs::create_dir_all(parent).await.map_err(to_asset_error)?;
     }
 
-    info!("extracting {} to {:?}", asset_hash, target_path);
+    info!("extracting {asset_hash} to {target_path:?}");
     let file = fs::File::create(&target_path)
         .await
         .map_err(to_asset_error)?;
@@ -165,7 +165,7 @@ async fn write_asset_to_pathname(
         .await
         .map_err(to_asset_error)?;
     file_writer.flush().await.map_err(to_asset_error)?;
-    trace!("{} is written to disk", asset_hash);
+    trace!("{asset_hash} is written to disk");
     Ok(())
 }
 
@@ -192,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let entry = match entry_result {
             Ok(file) => file,
             Err(e) => {
-                warn!("error reading entry from archive: {}", e);
+                warn!("error reading entry from archive: {e}");
                 continue;
             }
         };
@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = match entry.path() {
             Ok(p) => p.to_path_buf(),
             Err(e) => {
-                warn!("errors reading path from entry: {}", e);
+                warn!("errors reading path from entry: {e}");
                 continue;
             }
         };
@@ -223,10 +223,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match task.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                warn!("failed to write asset: {}", e);
+                warn!("failed to write asset: {e}");
             }
             Err(e) => {
-                warn!("an extraction task has failed: {}", e);
+                warn!("an extraction task has failed: {e}");
             }
         }
     }

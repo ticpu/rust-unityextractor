@@ -12,10 +12,7 @@ pub fn sanitize_path(path: &str) -> Result<String, io::Error> {
 
         // Check for ".." only in the directory part
         if dir_part.contains("..") {
-            warn!(
-                "path «{}» contains .. in directory part, this isn't supported",
-                path
-            );
+            warn!("path «{path}» contains .. in directory part, this isn't supported");
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Path contains invalid '..' in directory part",
