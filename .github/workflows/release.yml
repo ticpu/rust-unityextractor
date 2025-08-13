@@ -28,7 +28,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             cross: false
           - build: x86_64-windows
-            os: windows-2019
+            os: windows-2022
             rust: stable
             target: x86_64-pc-windows-msvc
             cross: false
@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           mkdir dist
-          if [ "${{ matrix.os }}" = "windows-2019" ]; then
+          if [ "${{ matrix.os }}" = "windows-2022" ]; then
             cp "target/${{ matrix.target }}/release/$BIN_NAME.exe" "dist/"
           else
             cp "target/${{ matrix.target }}/release/$BIN_NAME" "dist/"
