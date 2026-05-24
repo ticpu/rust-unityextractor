@@ -133,9 +133,10 @@ fn read_pathname<R: Read>(
     let mut path_name = String::new();
     entry.read_to_string(&mut path_name)?;
 
-    let asset_path = path.parent().unwrap().join("asset");
-
-    debug!("storing pathname: {}", path_name.escape_default());
+    let guid = extract_guid_from_path(&path);
+    let asset_path = PathBuf::from(&guid).join("asset");
+    
+    debug!("storing pathname: '{}' for {:?}", path_name.escape_default(), asset_path);
     context.insert_pathname(asset_path, path_name);
     Ok(())
 }
