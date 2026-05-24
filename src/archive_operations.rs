@@ -416,10 +416,13 @@ async fn delete_orphaned_asset(orphan_name: String) -> Result<(), AssetWriteErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory_tracker::MemoryTracker;
+    use crate::thread_pool::ThreadPool;
     use flate2::bufread::GzDecoder;
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Cursor;
+    use std::sync::Arc;
     use tar::Builder;
 
     const MB: u64 = 1024 * KB;
@@ -427,6 +430,7 @@ mod tests {
     /// Test utility for building Unity package archives with various asset types
     pub struct TestUnityPackageBuilder {
         entries: Vec<TestEntry>,
+        path_prefix: String,
     }
 
     #[derive(Clone)]
@@ -453,7 +457,14 @@ mod tests {
         pub fn new() -> Self {
             Self {
                 entries: Vec::new(),
+                path_prefix: String::new(),
             }
+        }
+
+        /// Use "./" prefix on tar entry paths, matching real Unity packages
+        pub fn with_dot_slash_prefix(mut self) -> Self {
+            self.path_prefix = "./".to_string();
+            self
         }
 
         /// Add a folder asset (only .meta file with folderAsset: yes, no asset file)
@@ -518,10 +529,11 @@ mod tests {
                 let gz_encoder = GzEncoder::new(&mut gz_buffer, Compression::default());
                 let mut tar_builder = Builder::new(gz_encoder);
 
+                let pfx = &self.path_prefix;
                 for entry in &self.entries {
                     match entry {
                         TestEntry::Asset { guid, data } => {
-                            add_tar_entry(&mut tar_builder, &format!("{guid}/asset"), data);
+                            add_tar_entry(&mut tar_builder, &format!("{pfx}{guid}/asset"), data);
                         }
                         TestEntry::FolderAsset { guid } => {
                             let meta_content = format!(
@@ -530,14 +542,14 @@ guid: {guid}
 folderAsset: yes
 DefaultImporter:
   externalObjects: {{}}
-  userData: 
-  assetBundleName: 
+  userData:
+  assetBundleName:
   assetBundleVariant:
 "#
                             );
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{guid}/asset.meta"),
+                                &format!("{pfx}{guid}/asset.meta"),
                                 meta_content.as_bytes(),
                             );
                         }
@@ -546,15 +558,13 @@ DefaultImporter:
                             data,
                             meta_content,
                         } => {
-                            // Add asset file
-                            add_tar_entry(&mut tar_builder, &format!("{guid}/asset"), data);
+                            add_tar_entry(&mut tar_builder, &format!("{pfx}{guid}/asset"), data);
 
-                            // Add metadata file
                             let default_meta = format!(
                                 r#"fileFormatVersion: 2
 guid: {guid}
 TextureImporter:
-  userData: 
+  userData:
 "#
                             );
                             let meta = meta_content
@@ -563,14 +573,14 @@ TextureImporter:
                                 .unwrap_or(&default_meta);
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{guid}/asset.meta"),
+                                &format!("{pfx}{guid}/asset.meta"),
                                 meta.as_bytes(),
                             );
                         }
                         TestEntry::Pathname { guid, path } => {
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{guid}/pathname"),
+                                &format!("{pfx}{guid}/pathname"),
                                 path.as_bytes(),
                             );
                         }
@@ -597,46 +607,29 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_extraction_asset_first() {
-        use crate::memory_tracker::MemoryTracker;
-        use crate::thread_pool::ThreadPool;
-        use std::sync::Arc;
-
         let package_data = TestUnityPackageBuilder::new()
             .add_asset(TEST_GUID, TEST_PATHNAME, TEST_ASSET_DATA)
             .build();
-        let cursor = Cursor::new(package_data);
-        let decoder = GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
 
-        let memory_tracker = Arc::new(MemoryTracker::new(MB)); // 1MB
-        let thread_pool = ThreadPool::new(2, memory_tracker);
-        let result = process_archive_entries(&mut archive, &thread_pool, 32 * MB).unwrap();
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
 
         // When asset comes before pathname, it will be orphaned initially
-        assert!(result.context.has_orphaned_work()); // Asset becomes orphaned
+        assert!(result.context.has_orphaned_work());
 
         thread_pool.shutdown().await;
     }
 
     #[tokio::test]
     async fn test_extraction_pathname_first() {
-        use crate::memory_tracker::MemoryTracker;
-        use crate::thread_pool::ThreadPool;
-        use std::sync::Arc;
-
         let package_data = TestUnityPackageBuilder::new()
             .add_orphaned_pathname(TEST_GUID, TEST_PATHNAME)
             .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
             .build();
-        let cursor = Cursor::new(package_data);
-        let decoder = GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
 
-        let memory_tracker = Arc::new(MemoryTracker::new(MB)); // 1MB
-        let thread_pool = ThreadPool::new(2, memory_tracker);
-        let result = process_archive_entries(&mut archive, &thread_pool, 32 * MB).unwrap();
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
 
-        // New system can extract immediately when asset comes after pathname
         assert!(!result.context.has_orphaned_work());
 
         thread_pool.shutdown().await;
@@ -644,22 +637,13 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_orphaned_asset_creation() {
-        use crate::memory_tracker::MemoryTracker;
-        use crate::thread_pool::ThreadPool;
-        use std::sync::Arc;
-
         let package_data = TestUnityPackageBuilder::new()
             .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
             .build();
-        let cursor = Cursor::new(package_data);
-        let decoder = GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
 
-        let memory_tracker = Arc::new(MemoryTracker::new(MB)); // 1MB
-        let thread_pool = ThreadPool::new(2, memory_tracker);
-        let result = process_archive_entries(&mut archive, &thread_pool, 32 * MB).unwrap();
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
 
-        // Should create orphaned asset in root
         assert!(result.context.has_orphaned_work());
         assert_eq!(result.context.orphaned_count(), 1);
 
@@ -668,25 +652,16 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_folder_asset_creation() {
-        use crate::memory_tracker::MemoryTracker;
-        use crate::thread_pool::ThreadPool;
-        use std::sync::Arc;
-
         let package_data = TestUnityPackageBuilder::new()
             .add_folder_asset("folder123", "Assets/Scripts/")
             .build();
-        let cursor = Cursor::new(package_data);
-        let decoder = GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
 
-        let memory_tracker = Arc::new(MemoryTracker::new(MB)); // 1MB
-        let thread_pool = ThreadPool::new(2, memory_tracker.clone());
-        let result = process_archive_entries(&mut archive, &thread_pool, 32 * MB).unwrap();
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
         create_folder_structures(&result.context, &thread_pool)
             .await
             .unwrap();
 
-        // Should create folder structure and no orphaned assets
         assert!(!result.context.has_orphaned_work());
 
         thread_pool.shutdown().await;
@@ -694,27 +669,123 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_mixed_package() {
-        use crate::memory_tracker::MemoryTracker;
-        use crate::thread_pool::ThreadPool;
-        use std::sync::Arc;
-
         let package_data = TestUnityPackageBuilder::new()
             .add_folder_asset("folder1", "Assets/Scripts/")
             .add_asset("asset1", "Assets/TestFile.txt", TEST_ASSET_DATA)
             .add_orphaned_asset("orphan1", b"orphaned data")
             .build();
 
-        let cursor = Cursor::new(package_data);
-        let decoder = GzDecoder::new(cursor);
-        let mut archive = tar::Archive::new(decoder);
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
 
-        let memory_tracker = Arc::new(MemoryTracker::new(MB)); // 1MB
-        let thread_pool = ThreadPool::new(2, memory_tracker);
-        let result = process_archive_entries(&mut archive, &thread_pool, 32 * MB).unwrap();
-
-        // Should have 2 orphaned assets (asset1 and orphan1) since asset1 comes before its pathname
+        // asset1 comes before its pathname → orphaned; orphan1 has no pathname → orphaned
         assert!(result.context.has_orphaned_work());
         assert_eq!(result.context.orphaned_count(), 2);
+
+        thread_pool.shutdown().await;
+    }
+
+    fn make_thread_pool() -> (ThreadPool, Arc<MemoryTracker>) {
+        use crate::memory_tracker::MemoryTracker;
+        let memory_tracker = Arc::new(MemoryTracker::new(MB));
+        let thread_pool = ThreadPool::new(2, memory_tracker.clone());
+        (thread_pool, memory_tracker)
+    }
+
+    fn process_package(data: Vec<u8>, thread_pool: &ThreadPool) -> ExtractionResult {
+        let cursor = Cursor::new(data);
+        let decoder = GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(decoder);
+        process_archive_entries(&mut archive, thread_pool, 32 * MB).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_dot_slash_prefix_pathname_before_asset() {
+        let package_data = TestUnityPackageBuilder::new()
+            .with_dot_slash_prefix()
+            .add_orphaned_pathname(TEST_GUID, TEST_PATHNAME)
+            .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
+            .build();
+
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
+
+        // Pathname stored first, asset resolved directly — no orphans
+        assert!(!result.context.has_orphaned_work());
+
+        thread_pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_dot_slash_prefix_asset_before_pathname() {
+        let package_data = TestUnityPackageBuilder::new()
+            .with_dot_slash_prefix()
+            .add_asset(TEST_GUID, TEST_PATHNAME, TEST_ASSET_DATA)
+            .build();
+
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
+
+        // Asset comes before pathname — becomes orphaned
+        assert!(result.context.has_orphaned_work());
+        assert_eq!(result.context.orphaned_count(), 1);
+
+        // Verify the orphan's pathname can be found in Pass 2
+        let (orphaned_assets, pathnames) = result.context.take_orphaned_data();
+        let orphan_path = &orphaned_assets[0];
+        let guid = orphan_path.to_string_lossy().to_string();
+        let asset_path = PathBuf::from(&guid).join("asset");
+        assert_eq!(
+            pathnames.get(&asset_path).map(|s| s.as_str()),
+            Some(TEST_PATHNAME),
+        );
+
+        thread_pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_dot_slash_prefix_orphaned_asset() {
+        let package_data = TestUnityPackageBuilder::new()
+            .with_dot_slash_prefix()
+            .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
+            .build();
+
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
+
+        assert!(result.context.has_orphaned_work());
+        assert_eq!(result.context.orphaned_count(), 1);
+
+        thread_pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_dot_slash_prefix_mixed_package() {
+        let package_data = TestUnityPackageBuilder::new()
+            .with_dot_slash_prefix()
+            .add_folder_asset("folder1", "Assets/Scripts/")
+            .add_asset("asset1", "Assets/TestFile.txt", TEST_ASSET_DATA)
+            .add_orphaned_asset("orphan1", b"orphaned data")
+            .build();
+
+        let (thread_pool, _) = make_thread_pool();
+        let result = process_package(package_data, &thread_pool);
+
+        // asset1 comes before its pathname → orphaned; orphan1 has no pathname → orphaned
+        assert!(result.context.has_orphaned_work());
+        assert_eq!(result.context.orphaned_count(), 2);
+
+        // asset1's pathname should be resolvable in Pass 2
+        let (orphaned_assets, pathnames) = result.context.take_orphaned_data();
+        let resolved_count = orphaned_assets
+            .iter()
+            .filter(|p| {
+                let guid = p.to_string_lossy().to_string();
+                let asset_path = PathBuf::from(&guid).join("asset");
+                pathnames.contains_key(&asset_path)
+            })
+            .count();
+        assert_eq!(resolved_count, 1);
 
         thread_pool.shutdown().await;
     }
