@@ -434,7 +434,6 @@ mod tests {
     /// Test utility for building Unity package archives with various asset types
     pub struct TestUnityPackageBuilder {
         entries: Vec<TestEntry>,
-        path_prefix: String,
     }
 
     #[derive(Clone)]
@@ -461,14 +460,7 @@ mod tests {
         pub fn new() -> Self {
             Self {
                 entries: Vec::new(),
-                path_prefix: String::new(),
             }
-        }
-
-        /// Use "./" prefix on tar entry paths, matching real Unity packages
-        pub fn with_dot_slash_prefix(mut self) -> Self {
-            self.path_prefix = "./".to_string();
-            self
         }
 
         /// Add a folder asset (only .meta file with folderAsset: yes, no asset file)
@@ -533,11 +525,10 @@ mod tests {
                 let gz_encoder = GzEncoder::new(&mut gz_buffer, Compression::default());
                 let mut tar_builder = Builder::new(gz_encoder);
 
-                let pfx = &self.path_prefix;
                 for entry in &self.entries {
                     match entry {
                         TestEntry::Asset { guid, data } => {
-                            add_tar_entry(&mut tar_builder, &format!("{pfx}{guid}/asset"), data);
+                            add_tar_entry(&mut tar_builder, &format!("{guid}/asset"), data);
                         }
                         TestEntry::FolderAsset { guid } => {
                             let meta_content = format!(
@@ -553,7 +544,7 @@ DefaultImporter:
                             );
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{pfx}{guid}/asset.meta"),
+                                &format!("{guid}/asset.meta"),
                                 meta_content.as_bytes(),
                             );
                         }
@@ -562,7 +553,7 @@ DefaultImporter:
                             data,
                             meta_content,
                         } => {
-                            add_tar_entry(&mut tar_builder, &format!("{pfx}{guid}/asset"), data);
+                            add_tar_entry(&mut tar_builder, &format!("{guid}/asset"), data);
 
                             let default_meta = format!(
                                 r#"fileFormatVersion: 2
@@ -577,14 +568,14 @@ TextureImporter:
                                 .unwrap_or(&default_meta);
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{pfx}{guid}/asset.meta"),
+                                &format!("{guid}/asset.meta"),
                                 meta.as_bytes(),
                             );
                         }
                         TestEntry::Pathname { guid, path } => {
                             add_tar_entry(
                                 &mut tar_builder,
-                                &format!("{pfx}{guid}/pathname"),
+                                &format!("{guid}/pathname"),
                                 path.as_bytes(),
                             );
                         }
@@ -731,95 +722,39 @@ TextureImporter:
         process_archive_entries(&mut archive, thread_pool, 32 * MB).unwrap()
     }
 
-    #[tokio::test]
-    async fn test_dot_slash_prefix_pathname_before_asset() {
-        let _cwd = TempCwd::new();
-        let package_data = TestUnityPackageBuilder::new()
-            .with_dot_slash_prefix()
-            .add_orphaned_pathname(TEST_GUID, TEST_PATHNAME)
-            .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
-            .build();
+    /// Feed read_pathname a path with "./" prefix (which the tar crate
+    /// normally strips) and verify the stored key matches what
+    /// process_orphaned_assets would look up in Pass 2.
+    #[test]
+    fn test_pathname_key_matches_orphan_lookup_key() {
+        let path_forms = [
+            PathBuf::from("guid123/pathname"),
+            PathBuf::from("./guid123/pathname"),
+        ];
 
-        let (thread_pool, _) = make_thread_pool();
-        let result = process_package(package_data, &thread_pool);
+        for path in &path_forms {
+            let mut context = ExtractionContext::new(32 * MB);
 
-        assert!(!result.context.has_orphaned_work());
+            let pathname_content = b"Assets/TestFile.txt";
+            let mut tar_buf = Vec::new();
+            {
+                let mut builder = Builder::new(&mut tar_buf);
+                add_tar_entry(&mut builder, "dummy", pathname_content);
+                builder.finish().unwrap();
+            }
+            let mut archive = tar::Archive::new(Cursor::new(&tar_buf));
+            let entry = archive.entries().unwrap().next().unwrap().unwrap();
 
-        thread_pool.shutdown().await;
-    }
+            read_pathname(&mut context, entry, path.clone()).unwrap();
 
-    #[tokio::test]
-    async fn test_dot_slash_prefix_asset_before_pathname() {
-        let _cwd = TempCwd::new();
-        let package_data = TestUnityPackageBuilder::new()
-            .with_dot_slash_prefix()
-            .add_asset(TEST_GUID, TEST_PATHNAME, TEST_ASSET_DATA)
-            .build();
+            // process_orphaned_assets constructs this lookup key:
+            let guid = extract_guid_from_path(path);
+            let lookup_key = PathBuf::from(&guid).join("asset");
 
-        let (thread_pool, _) = make_thread_pool();
-        let result = process_package(package_data, &thread_pool);
-
-        assert!(result.context.has_orphaned_work());
-        assert_eq!(result.context.orphaned_count(), 1);
-
-        // Verify the orphan's pathname can be found in Pass 2
-        let (orphaned_assets, pathnames) = result.context.take_orphaned_data();
-        let orphan_path = &orphaned_assets[0];
-        let guid = orphan_path.to_string_lossy().to_string();
-        let asset_path = PathBuf::from(&guid).join("asset");
-        assert_eq!(
-            pathnames.get(&asset_path).map(|s| s.as_str()),
-            Some(TEST_PATHNAME),
-        );
-
-        thread_pool.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_dot_slash_prefix_orphaned_asset() {
-        let _cwd = TempCwd::new();
-        let package_data = TestUnityPackageBuilder::new()
-            .with_dot_slash_prefix()
-            .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
-            .build();
-
-        let (thread_pool, _) = make_thread_pool();
-        let result = process_package(package_data, &thread_pool);
-
-        assert!(result.context.has_orphaned_work());
-        assert_eq!(result.context.orphaned_count(), 1);
-
-        thread_pool.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn test_dot_slash_prefix_mixed_package() {
-        let _cwd = TempCwd::new();
-        let package_data = TestUnityPackageBuilder::new()
-            .with_dot_slash_prefix()
-            .add_folder_asset("folder1", "Assets/Scripts/")
-            .add_asset("asset1", "Assets/TestFile.txt", TEST_ASSET_DATA)
-            .add_orphaned_asset("orphan1", b"orphaned data")
-            .build();
-
-        let (thread_pool, _) = make_thread_pool();
-        let result = process_package(package_data, &thread_pool);
-
-        assert!(result.context.has_orphaned_work());
-        assert_eq!(result.context.orphaned_count(), 2);
-
-        // asset1's pathname should be resolvable in Pass 2
-        let (orphaned_assets, pathnames) = result.context.take_orphaned_data();
-        let resolved_count = orphaned_assets
-            .iter()
-            .filter(|p| {
-                let guid = p.to_string_lossy().to_string();
-                let asset_path = PathBuf::from(&guid).join("asset");
-                pathnames.contains_key(&asset_path)
-            })
-            .count();
-        assert_eq!(resolved_count, 1);
-
-        thread_pool.shutdown().await;
+            assert!(
+                context.get_pathname(&lookup_key).is_some(),
+                "path {path:?}: Pass 2 lookup key {lookup_key:?} not found in pathnames map"
+            );
+        }
     }
 }
