@@ -135,8 +135,12 @@ fn read_pathname<R: Read>(
 
     let guid = extract_guid_from_path(&path);
     let asset_path = PathBuf::from(&guid).join("asset");
-    
-    debug!("storing pathname: '{}' for {:?}", path_name.escape_default(), asset_path);
+
+    debug!(
+        "storing pathname: '{}' for {:?}",
+        path_name.escape_default(),
+        asset_path
+    );
     context.insert_pathname(asset_path, path_name);
     Ok(())
 }
