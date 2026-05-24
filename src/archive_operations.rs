@@ -422,10 +422,14 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::io::Cursor;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tar::Builder;
 
     const MB: u64 = 1024 * KB;
+
+    // File operations use relative paths (cwd), so tests that trigger file writes
+    // must serialize and chdir into a tempdir to avoid polluting the repo.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     /// Test utility for building Unity package archives with various asset types
     pub struct TestUnityPackageBuilder {
@@ -607,6 +611,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_extraction_asset_first() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .add_asset(TEST_GUID, TEST_PATHNAME, TEST_ASSET_DATA)
             .build();
@@ -614,7 +619,6 @@ TextureImporter:
         let (thread_pool, _) = make_thread_pool();
         let result = process_package(package_data, &thread_pool);
 
-        // When asset comes before pathname, it will be orphaned initially
         assert!(result.context.has_orphaned_work());
 
         thread_pool.shutdown().await;
@@ -622,6 +626,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_extraction_pathname_first() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .add_orphaned_pathname(TEST_GUID, TEST_PATHNAME)
             .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
@@ -637,6 +642,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_orphaned_asset_creation() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
             .build();
@@ -652,6 +658,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_folder_asset_creation() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .add_folder_asset("folder123", "Assets/Scripts/")
             .build();
@@ -669,6 +676,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_mixed_package() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .add_folder_asset("folder1", "Assets/Scripts/")
             .add_asset("asset1", "Assets/TestFile.txt", TEST_ASSET_DATA)
@@ -678,7 +686,6 @@ TextureImporter:
         let (thread_pool, _) = make_thread_pool();
         let result = process_package(package_data, &thread_pool);
 
-        // asset1 comes before its pathname → orphaned; orphan1 has no pathname → orphaned
         assert!(result.context.has_orphaned_work());
         assert_eq!(result.context.orphaned_count(), 2);
 
@@ -686,10 +693,35 @@ TextureImporter:
     }
 
     fn make_thread_pool() -> (ThreadPool, Arc<MemoryTracker>) {
-        use crate::memory_tracker::MemoryTracker;
         let memory_tracker = Arc::new(MemoryTracker::new(MB));
         let thread_pool = ThreadPool::new(2, memory_tracker.clone());
         (thread_pool, memory_tracker)
+    }
+
+    struct TempCwd {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _tmpdir: tempfile::TempDir,
+        original_dir: PathBuf,
+    }
+
+    impl TempCwd {
+        fn new() -> Self {
+            let guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let original_dir = std::env::current_dir().unwrap();
+            let tmpdir = tempfile::tempdir().unwrap();
+            std::env::set_current_dir(tmpdir.path()).unwrap();
+            Self {
+                _guard: guard,
+                _tmpdir: tmpdir,
+                original_dir,
+            }
+        }
+    }
+
+    impl Drop for TempCwd {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original_dir).unwrap();
+        }
     }
 
     fn process_package(data: Vec<u8>, thread_pool: &ThreadPool) -> ExtractionResult {
@@ -701,6 +733,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_dot_slash_prefix_pathname_before_asset() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .with_dot_slash_prefix()
             .add_orphaned_pathname(TEST_GUID, TEST_PATHNAME)
@@ -710,7 +743,6 @@ TextureImporter:
         let (thread_pool, _) = make_thread_pool();
         let result = process_package(package_data, &thread_pool);
 
-        // Pathname stored first, asset resolved directly — no orphans
         assert!(!result.context.has_orphaned_work());
 
         thread_pool.shutdown().await;
@@ -718,6 +750,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_dot_slash_prefix_asset_before_pathname() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .with_dot_slash_prefix()
             .add_asset(TEST_GUID, TEST_PATHNAME, TEST_ASSET_DATA)
@@ -726,7 +759,6 @@ TextureImporter:
         let (thread_pool, _) = make_thread_pool();
         let result = process_package(package_data, &thread_pool);
 
-        // Asset comes before pathname — becomes orphaned
         assert!(result.context.has_orphaned_work());
         assert_eq!(result.context.orphaned_count(), 1);
 
@@ -745,6 +777,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_dot_slash_prefix_orphaned_asset() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .with_dot_slash_prefix()
             .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
@@ -761,6 +794,7 @@ TextureImporter:
 
     #[tokio::test]
     async fn test_dot_slash_prefix_mixed_package() {
+        let _cwd = TempCwd::new();
         let package_data = TestUnityPackageBuilder::new()
             .with_dot_slash_prefix()
             .add_folder_asset("folder1", "Assets/Scripts/")
@@ -771,7 +805,6 @@ TextureImporter:
         let (thread_pool, _) = make_thread_pool();
         let result = process_package(package_data, &thread_pool);
 
-        // asset1 comes before its pathname → orphaned; orphan1 has no pathname → orphaned
         assert!(result.context.has_orphaned_work());
         assert_eq!(result.context.orphaned_count(), 2);
 
