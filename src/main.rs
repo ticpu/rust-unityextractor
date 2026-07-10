@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = parse_arguments();
     SimpleLogger::new().with_level(config.log_level).init()?;
 
-    debug!("opening unitypackage file at {}", &config.input_path);
+    debug!("opening unitypackage file at {}", config.input_path);
     let file = std::fs::File::open(&config.input_path);
 
     if let Err(err) = file {
