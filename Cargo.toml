@@ -7,13 +7,13 @@ edition = "2021"
 
 [dependencies]
 argparse = "0.2"
-flate2 = "1.0"
+flate2 = "1"
 tar = "0.4"
 tokio = { version = "1.47", features = ["full"] }
 log = "0.4"
 simple_logger = "5"
-num_cpus = "1.17"
-bytesize = "2.0"
+num_cpus = "1"
+bytesize = "2"
 
 [dev-dependencies]
 tempfile = "3"
