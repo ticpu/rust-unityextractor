@@ -34,7 +34,7 @@ Sizes accept units such as `512MB` or `2GB`.
 - Every asset is written to the path recorded in its `pathname` entry.
 - Folder assets become directories, including empty ones.
 - `.meta` files are read to detect folders and are not written out.
-- Paths are sanitized: backslashes become separators, leading and trailing slashes, dots and whitespace are stripped, and a path with `..` in its directory part is refused with a warning.
+- Paths are sanitized: backslashes become separators, surrounding whitespace and empty or `.` components are dropped, leading `..` components are removed, and a `..` anywhere else is refused with a warning. Dots inside names, such as `.gitignore`, are kept.
 - An asset whose `pathname` comes later in the archive is written to a temporary file in the working directory and moved once its path is known; one that never gets a path is deleted with a warning.
 
 ## Memory and speed

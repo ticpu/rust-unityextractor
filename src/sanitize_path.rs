@@ -1,32 +1,42 @@
+//! Turns a `pathname` entry into a relative path that stays inside the
+//! working directory.
+//!
+//! The path is handled per component, never per character: dots are part of
+//! names (`.gitignore`, `file.`) and only the `.` and `..` components are
+//! special. Leading `..` components are dropped so a package built with
+//! relative paths still extracts in place; a `..` after a real component is
+//! refused, since it could climb out of the working directory.
+
 use log::warn;
 use std::io;
 
-const TRIM_CHARS: &[char] = &['\0', ' ', '\n', '\t', '\r', '/', '.'];
+const TRIM_CHARS: &[char] = &['\0', ' ', '\n', '\t', '\r'];
 const END_OF_STRING_CHARS: &[char] = &['\0', '\n', '\r'];
 
 pub fn sanitize_path(path: &str) -> Result<String, io::Error> {
-    let sanitized_path = path.trim_matches(TRIM_CHARS).replace('\\', "/");
+    let trimmed = path.trim_matches(TRIM_CHARS);
+    let line = match trimmed.find(END_OF_STRING_CHARS) {
+        Some(idx) => &trimmed[..idx],
+        None => trimmed,
+    };
+    let unified = line.replace('\\', "/");
 
-    if let Some(idx) = sanitized_path.rfind('/') {
-        let (dir_part, _) = sanitized_path.split_at(idx);
-
-        // Check for ".." only in the directory part
-        if dir_part.contains("..") {
-            warn!("path «{path}» contains .. in directory part, this isn't supported");
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Path contains invalid '..' in directory part",
-            ));
+    let mut components = Vec::new();
+    for component in unified.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.is_empty() => {}
+            ".." => {
+                warn!("path «{path}» contains .. after its first component, this isn't supported");
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Path contains invalid '..' component",
+                ));
+            }
+            name => components.push(name),
         }
     }
-
-    match sanitized_path.find(END_OF_STRING_CHARS) {
-        Some(idx) => {
-            let (final_path, _) = sanitized_path.split_at(idx);
-            Ok(final_path.to_string())
-        }
-        None => Ok(sanitized_path),
-    }
+    Ok(components.join("/"))
 }
 
 #[cfg(test)]
@@ -53,7 +63,7 @@ mod tests {
             "folder/file.ext"
         );
 
-        // .. anywhere in the dir part will error out.
+        // .. after a real component will error out.
         assert!(sanitize_path("folder/../file.ext").is_err());
 
         // new line/empty chars at the end should be removed
