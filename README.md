@@ -4,12 +4,9 @@ Extracts the assets of a `.unitypackage` file to disk without Unity. A Unity pac
 
 ## Install
 
-Prebuilt binaries for Linux and Windows (x86_64) are attached to each [release](https://github.com/ticpu/rust-unityextractor/releases). To build from source:
+Each [release](https://github.com/ticpu/rust-unityextractor/releases) has static Linux binaries for x86_64 and aarch64, which run on any distribution, and a Windows x86_64 exe. Every asset comes with a GPG signature, and `SHA256SUMS` lists their checksums.
 
-```sh
-cargo build --release
-# binary at target/release/rust-unityextractor
-```
+To build from source, `cargo build --release` puts the binary in target/release/. `./build.sh` cross-compiles every release target into dist/ inside a container, with podman or docker.
 
 ## Usage
 
