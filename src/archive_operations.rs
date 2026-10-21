@@ -93,13 +93,8 @@ pub fn process_archive_entries<R: Read>(
     let mut context = ExtractionContext::new(stream_threshold);
 
     for entry_result in archive.entries()? {
-        let entry = match entry_result {
-            Ok(file) => file,
-            Err(e) => {
-                warn!("error reading entry from archive: {e}");
-                continue;
-            }
-        };
+        // tar ends iteration after any error, so skipping it would truncate silently.
+        let entry = entry_result?;
 
         let path = match entry.path() {
             Ok(p) => p.to_path_buf(),
@@ -720,10 +715,58 @@ TextureImporter:
     }
 
     fn process_package(data: Vec<u8>, thread_pool: &ThreadPool) -> ExtractionResult {
+        try_process_package(data, thread_pool).unwrap()
+    }
+
+    fn try_process_package(
+        data: Vec<u8>,
+        thread_pool: &ThreadPool,
+    ) -> Result<ExtractionResult, io::Error> {
         let cursor = Cursor::new(data);
         let decoder = GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(decoder);
-        process_archive_entries(&mut archive, thread_pool, 32 * MB).unwrap()
+        process_archive_entries(&mut archive, thread_pool, 32 * MB)
+    }
+
+    #[tokio::test]
+    async fn test_non_gzip_input_is_an_error() {
+        let _cwd = TempCwd::new();
+        let (thread_pool, _) = make_thread_pool();
+
+        let result = try_process_package(b"not a gzip stream".to_vec(), &thread_pool);
+
+        assert!(result.is_err(), "garbage input must not extract as empty");
+        thread_pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_header_mid_archive_is_an_error() {
+        const TAR_BLOCK: usize = 512;
+        const TAR_END_MARKER: usize = 2 * TAR_BLOCK;
+        let _cwd = TempCwd::new();
+        let package_data = TestUnityPackageBuilder::new()
+            .add_asset("asset1", "Assets/First.txt", TEST_ASSET_DATA)
+            .build();
+
+        // Replace the end-of-archive marker with a header whose checksum is wrong.
+        let mut tar_data = Vec::new();
+        GzDecoder::new(Cursor::new(package_data))
+            .read_to_end(&mut tar_data)
+            .unwrap();
+        tar_data.truncate(tar_data.len() - TAR_END_MARKER);
+        tar_data.extend([0xFF; TAR_BLOCK]);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        io::Write::write_all(&mut encoder, &tar_data).unwrap();
+        let corrupt_package = encoder.finish().unwrap();
+        let (thread_pool, _) = make_thread_pool();
+
+        let result = try_process_package(corrupt_package, &thread_pool);
+
+        assert!(
+            result.is_err(),
+            "corrupt package must not extract partially"
+        );
+        thread_pool.shutdown().await;
     }
 
     /// Feed read_pathname a path with "./" prefix (which the tar crate

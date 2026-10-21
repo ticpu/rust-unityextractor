@@ -43,7 +43,7 @@ The archive is read sequentially. Files below the stream threshold are buffered 
 
 ## Exit status
 
-0 on success, 2 when the package cannot be opened or an option is unknown, 1 on an invalid size or a write error. A single asset that fails to write is logged as a warning and does not stop the extraction.
+0 on success, 2 when the package cannot be opened or an option is unknown, 1 on an invalid size, a corrupt archive or a write error. Files written before a corrupt part of the archive stay on disk. A single asset that fails to write is logged as a warning and does not stop the extraction.
 
 ## License
 

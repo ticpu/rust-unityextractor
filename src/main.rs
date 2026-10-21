@@ -145,7 +145,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("pass 1: processing archive entries");
     let decoder = GzDecoder::new(&file);
     let mut archive = tar::Archive::new(decoder);
-    let result = process_archive_entries(&mut archive, &thread_pool, config.stream_threshold)?;
+    let result = match process_archive_entries(&mut archive, &thread_pool, config.stream_threshold)
+    {
+        Ok(result) => result,
+        Err(err) => {
+            error!("cannot read archive {}: {}", config.input_path, err);
+            // Let queued writes finish so no asset is left half-written.
+            thread_pool.shutdown().await;
+            std::process::exit(1);
+        }
+    };
 
     // Create folder structures for pathnames that are marked as folders
     create_folder_structures(&result.context, &thread_pool).await?;
