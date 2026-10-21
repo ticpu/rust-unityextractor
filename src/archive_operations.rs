@@ -188,7 +188,7 @@ fn read_asset<R: Read>(
             .map_err(|e| io::Error::other(e.to_string()))?;
         } else {
             // Try to queue small file
-            let mut asset_data = Vec::new();
+            let mut asset_data = Vec::with_capacity(asset_size as usize);
             entry.read_to_end(&mut asset_data)?;
 
             let asset_data_for_task = asset_data.clone();
@@ -234,7 +234,7 @@ fn read_asset<R: Read>(
             .map_err(|e| io::Error::other(e.to_string()))?;
         } else {
             // Try to queue small orphaned file
-            let mut asset_data = Vec::new();
+            let mut asset_data = Vec::with_capacity(asset_size as usize);
             entry.read_to_end(&mut asset_data)?;
 
             let asset_data_for_task = asset_data.clone();
