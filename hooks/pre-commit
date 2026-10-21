@@ -1,0 +1,33 @@
+#!/bin/bash
+# Pre-commit hook to check formatting, clippy and tests
+
+set -e
+
+echo "Running cargo fmt check..."
+if ! cargo fmt --all -- --check; then
+    echo "Code is not formatted. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+echo "Running cargo clippy..."
+if ! cargo clippy --all-targets --message-format=short -- -D warnings; then
+    echo "Clippy found warnings. Fix them before committing."
+    exit 1
+fi
+
+echo "Running tests..."
+if ! test_output=$(cargo test --release 2>&1); then
+    echo "$test_output" | tail
+    echo "Tests failed. Fix them before committing."
+    exit 1
+fi
+
+# Optional: scanned only where gitleaks is installed, silent unless it finds one.
+if command -v gitleaks &>/dev/null; then
+    if ! gitleaks protect --staged --no-banner --log-level warn --verbose --redact; then
+        echo "gitleaks found secrets in staged changes."
+        exit 1
+    fi
+fi
+
+echo "Pre-commit checks passed"
