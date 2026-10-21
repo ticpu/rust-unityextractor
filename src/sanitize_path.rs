@@ -68,4 +68,41 @@ mod tests {
             "folder/file.ext"
         );
     }
+
+    #[test]
+    fn test_dots_in_names_are_kept() {
+        assert_eq!(sanitize_path(".gitignore").unwrap(), ".gitignore");
+        assert_eq!(
+            sanitize_path(".github/workflows/ci.yml").unwrap(),
+            ".github/workflows/ci.yml"
+        );
+        assert_eq!(sanitize_path("Assets/file.").unwrap(), "Assets/file.");
+        assert_eq!(
+            sanitize_path("Assets/fo..lder/file.ext").unwrap(),
+            "Assets/fo..lder/file.ext"
+        );
+    }
+
+    #[test]
+    fn test_dot_components_are_removed() {
+        assert_eq!(
+            sanitize_path("./Assets/file.ext").unwrap(),
+            "Assets/file.ext"
+        );
+        assert_eq!(
+            sanitize_path("../../Assets/file.ext").unwrap(),
+            "Assets/file.ext"
+        );
+        assert_eq!(
+            sanitize_path("Assets/./file.ext").unwrap(),
+            "Assets/file.ext"
+        );
+        assert_eq!(sanitize_path("Assets/Folder/").unwrap(), "Assets/Folder");
+    }
+
+    #[test]
+    fn test_parent_component_after_start_is_refused() {
+        assert!(sanitize_path("Assets/..").is_err());
+        assert!(sanitize_path("Assets\\..\\..\\etc\\passwd").is_err());
+    }
 }
