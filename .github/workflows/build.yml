@@ -1,49 +1,106 @@
-name: Build
+name: Build and Release
+
 on:
-  pull_request:
   push:
-    branches:
-      - main
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
   schedule:
     - cron: '00 01 * * *'
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - run: cargo check
-
   test:
-    name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test --release
+    - run: cargo fmt --all -- --check
+    - run: cargo clippy --all-targets -- -D warnings
+    - run: cargo test --release
 
-  lints:
-    name: Lints
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+    - name: Cross-compile all targets
+      run: ./build.sh
 
-      - uses: Swatinem/rust-cache@v2
+    - name: Test binary
+      run: |
+        bin=dist/rust-unityextractor.x86_64-linux
+        help_output=$("$bin" --help 2>&1)
+        if [[ "$help_output" != *"Unity package extractor"* ]]; then
+          echo "Binary help test failed: $help_output" >&2
+          exit 1
+        fi
+        # A file that is not a package must fail, not extract nothing.
+        if "$bin" Cargo.toml; then
+          echo "Binary accepted a non-gzip file" >&2
+          exit 1
+        fi
 
-      - run: cargo fmt --all -- --check
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v7
+      with:
+        name: binaries
+        path: dist/
+        retention-days: 30
 
-      - run: cargo clippy -- -D warnings
+  release:
+    needs: [ test, build ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Download binaries
+      uses: actions/download-artifact@v8
+      with:
+        name: binaries
+        path: dist
+
+    - name: Check tag matches Cargo.toml version
+      run: |
+        version=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+        if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+          echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+          exit 1
+        fi
+
+    - name: Prepare release assets
+      run: |
+        mkdir assets
+        for platform in x86_64-linux aarch64-linux; do
+          mv "dist/rust-unityextractor.$platform" "assets/rust-unityextractor-$GITHUB_REF_NAME-$platform"
+        done
+        mv dist/rust-unityextractor.x86_64-windows.exe "assets/rust-unityextractor-$GITHUB_REF_NAME-x86_64-windows.exe"
+        chmod +x assets/*
+        cd assets
+        sha256sum rust-unityextractor-* > SHA256SUMS
+
+    # Draft until sign-release.sh signs it: a published release's assets are
+    # immutable. The notes are the annotated tag's body, without its subject.
+    - name: Create Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # checkout fetches the tag as lightweight, losing its message
+        git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+        gh release create "$GITHUB_REF_NAME" \
+          --draft \
+          --title "$GITHUB_REF_NAME" \
+          --notes "$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")" \
+          assets/*
