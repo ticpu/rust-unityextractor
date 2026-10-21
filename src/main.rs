@@ -2,6 +2,7 @@ use crate::archive_operations::*;
 use crate::memory_tracker::MemoryTracker;
 use crate::thread_pool::ThreadPool;
 use argparse::{ArgumentParser, IncrBy, Store};
+use bytesize::ByteSize;
 use flate2::read::GzDecoder;
 use log::{debug, error, info, LevelFilter};
 use simple_logger::SimpleLogger;
@@ -65,7 +66,7 @@ fn parse_arguments() -> Config {
 
     // Parse memory limit using bytesize
     let max_buffer_memory = max_buffer_memory_str
-        .parse::<bytesize::ByteSize>()
+        .parse::<ByteSize>()
         .map_err(|e| format!("Invalid memory size '{max_buffer_memory_str}': {e}"))
         .unwrap_or_else(|e| {
             eprintln!("{e}");
@@ -75,7 +76,7 @@ fn parse_arguments() -> Config {
 
     // Parse stream threshold using bytesize
     let stream_threshold = stream_threshold_str
-        .parse::<bytesize::ByteSize>()
+        .parse::<ByteSize>()
         .map_err(|e| format!("Invalid stream threshold '{stream_threshold_str}': {e}"))
         .unwrap_or_else(|e| {
             eprintln!("{e}");
@@ -126,10 +127,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let thread_pool = ThreadPool::new(config.writer_threads, memory_tracker.clone());
 
     info!(
-        "starting {} writer threads with {}MB memory limit and {}MB stream threshold",
+        "starting {} writer threads with {} memory limit and {} stream threshold",
         config.writer_threads,
-        config.max_buffer_memory / (1024 * 1024),
-        config.stream_threshold / (1024 * 1024)
+        ByteSize(config.max_buffer_memory).display().si(),
+        ByteSize(config.stream_threshold).display().si()
     );
 
     // Pass 1: Read compressed file sequentially

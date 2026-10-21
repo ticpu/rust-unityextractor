@@ -27,7 +27,7 @@ Assets are extracted into the current working directory, under their package pat
 | `-m`, `--max-memory SIZE` | 1GB | Memory allowed for buffered files waiting to be written |
 | `--stream-threshold SIZE` | 32MB | Files at least this large are streamed straight to disk |
 
-Sizes accept units such as `512MB` or `2GB`.
+Sizes take a unit: MB and GB are powers of 1000, MiB and GiB powers of 1024.
 
 ## What gets extracted
 
