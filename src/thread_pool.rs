@@ -15,7 +15,7 @@ pub type WriteTask = Box<
 
 pub struct ThreadPool {
     sender: mpsc::UnboundedSender<WriteTask>,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<JoinHandle<usize>>,
     memory_tracker: Arc<MemoryTracker>,
 }
 
@@ -30,6 +30,7 @@ impl ThreadPool {
             let receiver = receiver.clone();
             let handle = tokio::spawn(async move {
                 debug!("Writer thread {thread_id} started");
+                let mut failures = 0;
 
                 loop {
                     let task = {
@@ -38,17 +39,15 @@ impl ThreadPool {
                             Some(task) => task,
                             None => {
                                 debug!("Writer thread {thread_id} shutting down");
-                                break;
+                                break failures;
                             }
                         }
                     };
 
                     let future = task();
-                    match future.await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            warn!("Write task failed: {e}");
-                        }
+                    if let Err(e) = future.await {
+                        warn!("Write task failed: {e}");
+                        failures += 1;
                     }
                 }
             });
@@ -97,17 +96,24 @@ impl ThreadPool {
         }
     }
 
-    pub async fn shutdown(self) {
+    /// Waits for every queued task and returns how many failed, each already
+    /// logged; a panicked writer thread counts as one failure.
+    pub async fn shutdown(self) -> usize {
         // Close the sender to signal threads to shut down
         drop(self.sender);
 
-        // Wait for all threads to complete
+        let mut failures = 0;
         for handle in self.handles {
-            if let Err(e) = handle.await {
-                warn!("Writer thread panicked: {e}");
+            match handle.await {
+                Ok(thread_failures) => failures += thread_failures,
+                Err(e) => {
+                    warn!("Writer thread panicked: {e}");
+                    failures += 1;
+                }
             }
         }
 
-        debug!("Thread pool shutdown complete");
+        debug!("Thread pool shutdown complete, {failures} failed tasks");
+        failures
     }
 }

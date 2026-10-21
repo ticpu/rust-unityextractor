@@ -729,6 +729,28 @@ TextureImporter:
     }
 
     #[tokio::test]
+    async fn test_failed_queued_write_is_counted() {
+        let _cwd = TempCwd::new();
+        let package = || {
+            TestUnityPackageBuilder::new()
+                .add_orphaned_pathname(TEST_GUID, "Blocked/file.txt")
+                .add_orphaned_asset(TEST_GUID, TEST_ASSET_DATA)
+                .build()
+        };
+
+        let (thread_pool, _) = make_thread_pool();
+        process_package(package(), &thread_pool);
+        assert_eq!(thread_pool.shutdown().await, 0, "control run must succeed");
+
+        std::fs::remove_dir_all("Blocked").unwrap();
+        // A regular file where the parent directory should be makes the write fail.
+        std::fs::write("Blocked", b"").unwrap();
+        let (thread_pool, _) = make_thread_pool();
+        process_package(package(), &thread_pool);
+        assert_eq!(thread_pool.shutdown().await, 1);
+    }
+
+    #[tokio::test]
     async fn test_non_gzip_input_is_an_error() {
         let _cwd = TempCwd::new();
         let (thread_pool, _) = make_thread_pool();

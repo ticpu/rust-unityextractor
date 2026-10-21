@@ -153,6 +153,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create folder structures for pathnames that are marked as folders
     create_folder_structures(&result.context, &thread_pool).await?;
 
+    // Pass 2 moves the files pass 1 wrote, so every pass 1 write must be done.
+    info!("waiting for pass 1 write tasks to complete");
+    let mut failures = thread_pool.shutdown().await;
+
     // Pass 2: Handle orphaned assets
     // - Iterate the orphaned asset and move them where they belong, creating missing directories as needed
     // - Show warn!() for assets missing pathname and delete them
@@ -161,12 +165,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "pass 2: processing {} orphaned assets",
             result.context.orphaned_count()
         );
+        let thread_pool = ThreadPool::new(config.writer_threads, memory_tracker);
         process_orphaned_assets(result.context, &thread_pool).await?;
+        failures += thread_pool.shutdown().await;
     }
 
-    // Shutdown thread pool and wait for all tasks to complete
-    info!("waiting for all write tasks to complete");
-    thread_pool.shutdown().await;
+    if failures > 0 {
+        error!("{failures} write operations failed, see the warnings above");
+        std::process::exit(1);
+    }
     info!("extraction complete");
 
     Ok(())
