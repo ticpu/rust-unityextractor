@@ -49,6 +49,9 @@ jobs:
           exit 1
         fi
 
+    - name: Build .deb packages
+      run: make deb
+
     - name: Upload artifacts
       uses: actions/upload-artifact@v7
       with:
@@ -64,7 +67,10 @@ jobs:
       contents: write
 
     steps:
+    # Full history: the Makefile derives the package version from the tag.
     - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
 
     - name: Download binaries
       uses: actions/download-artifact@v8
@@ -82,14 +88,18 @@ jobs:
 
     - name: Prepare release assets
       run: |
+        # The artifact loses mtimes, so make would otherwise rebuild the binaries
+        touch dist/*
+        make deb
         mkdir assets
         for platform in x86_64-linux aarch64-linux; do
           mv "dist/rust-unityextractor.$platform" "assets/rust-unityextractor-$GITHUB_REF_NAME-$platform"
         done
         mv dist/rust-unityextractor.x86_64-windows.exe "assets/rust-unityextractor-$GITHUB_REF_NAME-x86_64-windows.exe"
         chmod +x assets/*
+        mv ./*.deb assets/
         cd assets
-        sha256sum rust-unityextractor-* > SHA256SUMS
+        sha256sum rust-unityextractor* > SHA256SUMS
 
     # Draft until sign-release.sh signs it: a published release's assets are
     # immutable. The notes are the annotated tag's body, without its subject.

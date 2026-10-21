@@ -17,3 +17,5 @@ Cargo.lock
 tmp/
 dist/
 scratch/
+*.deb
+package.tmp/

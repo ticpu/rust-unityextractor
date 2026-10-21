@@ -1,0 +1,11 @@
+Package: rust-unityextractor
+Version: 0.0.0-replaced-by-makefile
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Jérôme Poulin <jeromepoulin@gmail.com>
+Homepage: https://github.com/ticpu/rust-unityextractor
+Description: Extract assets from Unity packages
+ Extracts the assets of a .unitypackage file to the working directory in a
+ single pass, with bounded memory and parallel writes. The binary is
+ statically linked.
