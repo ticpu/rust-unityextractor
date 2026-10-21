@@ -1,4 +1,5 @@
 use log::{debug, trace, warn};
+use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -61,14 +62,16 @@ impl ThreadPool {
         }
     }
 
-    /// Try to queue a task if memory is available
-    /// Returns true if queued, false if it should be handled synchronously
-    pub fn try_queue_task(&self, task_size: u64, task: WriteTask) -> bool {
-        if !self.memory_tracker.can_allocate(task_size) {
-            debug!("Cannot queue task of size {task_size} bytes - memory limit reached");
-            return false;
-        }
+    /// Whether a task of `task_size` bytes fits in the buffer budget. Room seen
+    /// here is still there at queue_task: the archive reader is the only
+    /// producer, and writer threads only release memory.
+    pub fn has_room(&self, task_size: u64) -> bool {
+        self.memory_tracker.can_allocate(task_size)
+    }
 
+    /// Queues a task whose room was checked with has_room. Fails only when
+    /// every writer thread has stopped.
+    pub fn queue_task(&self, task_size: u64, task: WriteTask) -> Result<(), io::Error> {
         self.memory_tracker.reserve(task_size);
 
         let memory_tracker = self.memory_tracker.clone();
@@ -83,17 +86,21 @@ impl ThreadPool {
                 >
         });
 
-        match self.sender.send(wrapped_task) {
-            Ok(()) => {
-                trace!("Queued task of size {task_size} bytes");
-                true
-            }
-            Err(_) => {
-                warn!("Failed to queue task - channel closed");
-                self.memory_tracker.release(task_size);
-                false
-            }
+        if self.sender.send(wrapped_task).is_err() {
+            self.memory_tracker.release(task_size);
+            return Err(io::Error::other("all writer threads have stopped"));
         }
+        trace!("Queued task of size {task_size} bytes");
+        Ok(())
+    }
+
+    /// Queues `task` if it fits the buffer budget, else runs it here.
+    pub async fn queue_or_run(&self, task_size: u64, task: WriteTask) -> Result<(), io::Error> {
+        if self.has_room(task_size) {
+            return self.queue_task(task_size, task);
+        }
+        debug!("Queue full, running task of size {task_size} bytes synchronously");
+        task().await.map_err(io::Error::other)
     }
 
     /// Waits for every queued task and returns how many failed, each already

@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::file_operations;
-use crate::file_operations::{stream_asset_to_pathname, stream_orphaned_asset};
+use crate::file_operations::stream_asset_to_pathname;
 use crate::memory_tracker::MemoryTracker;
 use crate::thread_pool::{ThreadPool, WriteTask};
 
 const KB: u64 = 1024;
 
+#[derive(Debug)]
 pub struct AssetWriteError {
     pub error: io::Error,
     pub path: String,
@@ -23,6 +24,9 @@ impl fmt::Display for AssetWriteError {
         write!(f, "{:?}: {}", self.path, self.error)
     }
 }
+
+// The cause is already in the Display text, so source() stays empty.
+impl std::error::Error for AssetWriteError {}
 
 pub type FolderSet = HashSet<OsString>;
 pub type OrphanedAssets = Vec<PathBuf>;
@@ -196,7 +200,7 @@ fn read_metadata<R: Read>(
 fn read_asset<R: Read>(
     context: &mut ExtractionContext,
     thread_pool: &ThreadPool,
-    mut entry: tar::Entry<'_, R>,
+    entry: tar::Entry<'_, R>,
     path: PathBuf,
 ) -> Result<(), io::Error> {
     let asset_size = entry.header().size()?;
@@ -204,102 +208,50 @@ fn read_asset<R: Read>(
 
     let meta_path = path.parent().unwrap().join("asset.meta");
 
-    // Check if we have a pathname for this asset
-    if let Some(pathname) = context.get_pathname(&path) {
+    let (target, context_name) = if let Some(pathname) = context.get_pathname(&path) {
         debug!(
             "extracting asset to proper location: {}",
             pathname.escape_default()
         );
-
-        let entry_hash = path.to_string_lossy().to_string();
-        let pathname_clone = pathname.clone();
-
-        // Route based on size: large files stream synchronously, small files queue
-        if asset_size >= context.stream_threshold {
-            debug!("Streaming large asset ({asset_size} bytes) synchronously");
-            let context_name = format!("extracting {}", extract_asset_hash(&entry_hash));
-            stream_asset_to_pathname(
-                entry,
-                &pathname_clone,
-                &context_name,
-                context.stream_threshold,
-            )
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        } else {
-            // Try to queue small file
-            let mut asset_data = Vec::with_capacity(asset_size as usize);
-            entry.read_to_end(&mut asset_data)?;
-
-            let asset_data_for_task = asset_data.clone();
-            let task: WriteTask = Box::new(move || {
-                Box::pin(async move {
-                    write_asset_to_pathname(asset_data_for_task, entry_hash, pathname_clone).await
-                })
-            });
-
-            if !thread_pool.try_queue_task(asset_size, task) {
-                // Fallback to synchronous streaming if queue is full
-                debug!("Queue full, streaming small asset ({asset_size} bytes) synchronously");
-                let context_name =
-                    format!("extracting {}", extract_asset_hash(&path.to_string_lossy()));
-                let pathname_for_fallback = pathname.clone();
-                stream_asset_to_pathname(
-                    io::Cursor::new(asset_data),
-                    &pathname_for_fallback,
-                    &context_name,
-                    context.stream_threshold,
-                )
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            }
-        }
+        let entry_hash = path.to_string_lossy();
+        let context_name = format!("extracting {}", extract_asset_hash(&entry_hash));
+        (pathname.clone(), context_name)
     } else if context.is_folder(&meta_path) {
         debug!("skipping folder asset content for {path:?}");
+        return Ok(());
     } else {
-        // Extract asset to root directory as orphaned file
         let orphan_name = extract_guid_from_path(&path);
         debug!("extracting orphaned asset to root: {orphan_name}");
-        let orphan_path = PathBuf::from(&orphan_name);
-        context.add_orphaned_asset(orphan_path.clone());
+        context.add_orphaned_asset(PathBuf::from(&orphan_name));
+        (orphan_name, "writing orphaned asset to root".to_string())
+    };
 
-        // Route orphaned assets similar to regular assets
-        if asset_size >= context.stream_threshold {
-            debug!("Streaming large orphaned asset ({asset_size} bytes) synchronously");
-            stream_orphaned_asset(
-                entry,
-                &orphan_name,
-                "writing orphaned asset to root",
-                context.stream_threshold,
-            )
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        } else {
-            // Try to queue small orphaned file
-            let mut asset_data = Vec::with_capacity(asset_size as usize);
-            entry.read_to_end(&mut asset_data)?;
-
-            let asset_data_for_task = asset_data.clone();
-            let orphan_name_for_task = orphan_name.clone();
-            let task: WriteTask = Box::new(move || {
-                Box::pin(async move {
-                    write_orphaned_asset(asset_data_for_task, orphan_name_for_task).await
-                })
-            });
-
-            if !thread_pool.try_queue_task(asset_size, task) {
-                // Fallback to synchronous streaming if queue is full
-                debug!(
-                    "Queue full, streaming small orphaned asset ({asset_size} bytes) synchronously"
-                );
-                stream_orphaned_asset(
-                    io::Cursor::new(asset_data),
-                    &orphan_name,
-                    "writing orphaned asset to root",
-                    context.stream_threshold,
-                )
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            }
-        }
+    let stream_threshold = context.stream_threshold;
+    if asset_size < stream_threshold && thread_pool.has_room(asset_size) {
+        queue_asset(thread_pool, entry, asset_size, target, context_name)
+    } else {
+        debug!("streaming asset ({asset_size} bytes) synchronously");
+        let chunk_size = stream_threshold.min(asset_size);
+        stream_asset_to_pathname(entry, &target, &context_name, chunk_size)
+            .map_err(io::Error::other)
     }
-    Ok(())
+}
+
+fn queue_asset<R: Read>(
+    thread_pool: &ThreadPool,
+    mut entry: tar::Entry<'_, R>,
+    asset_size: u64,
+    target: String,
+    context_name: String,
+) -> Result<(), io::Error> {
+    let mut asset_data = Vec::with_capacity(asset_size as usize);
+    entry.read_to_end(&mut asset_data)?;
+    let task: WriteTask = Box::new(move || {
+        Box::pin(async move {
+            file_operations::create_file_with_content(asset_data, &target, &context_name).await
+        })
+    });
+    thread_pool.queue_task(asset_size, task)
 }
 
 // Pass 2: Process orphaned assets - now handled during archive processing
@@ -329,36 +281,16 @@ pub async fn process_orphaned_assets(
                 guid,
                 pathname.escape_default()
             );
-            let pathname_clone = pathname.clone();
-            let guid_clone = guid.clone();
-
+            let pathname = pathname.clone();
             let task: WriteTask = Box::new(move || {
-                Box::pin(async move { move_orphaned_asset(guid_clone, pathname_clone).await })
+                Box::pin(async move { move_orphaned_asset(guid, pathname).await })
             });
-
-            // For orphaned assets, we don't know the size, so assume small and queue
-            // If queue is full, handle synchronously
-            if !thread_pool.try_queue_task(KB, task) {
-                // Assume 1KB for orphaned moves
-                debug!("Queue full, moving orphaned asset {guid} synchronously");
-                move_orphaned_asset(guid, pathname.clone())
-                    .await
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            }
+            thread_pool.queue_or_run(KB, task).await?;
         } else {
             warn!("No pathname found for orphaned asset {guid}, deleting");
-            let guid_clone = guid.clone();
-
             let task: WriteTask =
-                Box::new(move || Box::pin(async move { delete_orphaned_asset(guid_clone).await }));
-
-            if !thread_pool.try_queue_task(1, task) {
-                // Minimal size for deletion
-                debug!("Queue full, deleting orphaned asset {guid} synchronously");
-                delete_orphaned_asset(guid)
-                    .await
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            }
+                Box::new(move || Box::pin(async move { delete_orphaned_asset(guid).await }));
+            thread_pool.queue_or_run(1, task).await?;
         }
     }
 
@@ -373,18 +305,10 @@ pub async fn create_folder_structures(
     for (asset_path, pathname) in &context.pathnames {
         let meta_path = asset_path.parent().unwrap().join("asset.meta");
         if context.is_folder(&meta_path) {
-            let pathname_clone = pathname.clone();
-            let task: WriteTask = Box::new(move || {
-                Box::pin(async move { create_folder_structure(pathname_clone).await })
-            });
-
-            if !thread_pool.try_queue_task(1, task) {
-                // Minimal size for folder creation
-                debug!("Queue full, creating folder structure synchronously");
-                create_folder_structure(pathname.clone())
-                    .await
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            }
+            let pathname = pathname.clone();
+            let task: WriteTask =
+                Box::new(move || Box::pin(async move { create_folder_structure(pathname).await }));
+            thread_pool.queue_or_run(1, task).await?;
         }
     }
 
@@ -409,33 +333,6 @@ fn extract_asset_hash(entry_hash: &str) -> &str {
 
 async fn create_folder_structure(path_name: String) -> Result<(), AssetWriteError> {
     file_operations::create_directory_structure(&path_name, "creating folder structure").await
-}
-
-async fn write_asset_to_pathname(
-    asset_data: Vec<u8>,
-    entry_hash: String,
-    path_name: String,
-) -> Result<(), AssetWriteError> {
-    let asset_hash: &str;
-    match entry_hash.find('/') {
-        Some(idx) => {
-            (asset_hash, _) = entry_hash.split_at(idx);
-        }
-        None => {
-            asset_hash = &entry_hash;
-        }
-    }
-
-    let context_name = format!("extracting {asset_hash}");
-    file_operations::create_file_with_content(asset_data, &path_name, &context_name).await
-}
-
-async fn write_orphaned_asset(
-    asset_data: Vec<u8>,
-    orphan_name: String,
-) -> Result<(), AssetWriteError> {
-    let context_name = "writing orphaned asset to root".to_string();
-    file_operations::create_file_with_content(asset_data, &orphan_name, &context_name).await
 }
 
 async fn move_orphaned_asset(

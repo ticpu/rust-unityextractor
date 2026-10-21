@@ -29,12 +29,13 @@ pub async fn create_file_with_content(
     }
 
     info!("{context_name} to {sanitized_path:?}");
-    let file = fs::File::create(&sanitized_path).await.map_err(to_error)?;
-    let mut file_writer = io::BufWriter::new(file);
-
-    use tokio::io::AsyncWriteExt;
-    file_writer.write_all(&content).await.map_err(to_error)?;
-    file_writer.flush().await.map_err(to_error)?;
+    // tokio::fs copies every write into its own buffer; std::fs writes the owned one.
+    let path = sanitized_path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(path, content))
+        .await
+        .map_err(io::Error::other)
+        .and_then(|written| written)
+        .map_err(to_error)?;
 
     trace!("{context_name} written successfully");
     Ok(())
@@ -153,14 +154,4 @@ pub fn stream_asset_to_pathname<R: Read>(
     file.flush().map_err(to_error)?;
     trace!("{context_name} streamed successfully");
     Ok(())
-}
-
-/// Stream orphaned asset directly to disk using chunked reads
-pub fn stream_orphaned_asset<R: Read>(
-    reader: R,
-    orphan_name: &str,
-    context_name: &str,
-    chunk_size: u64,
-) -> Result<(), AssetWriteError> {
-    stream_asset_to_pathname(reader, orphan_name, context_name, chunk_size)
 }
