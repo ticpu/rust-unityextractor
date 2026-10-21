@@ -1,12 +1,14 @@
-use log::{debug, trace, warn};
+use log::{debug, info, trace, warn};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::file_operations;
 use crate::file_operations::{stream_asset_to_pathname, stream_orphaned_asset};
+use crate::memory_tracker::MemoryTracker;
 use crate::thread_pool::{ThreadPool, WriteTask};
 
 const KB: u64 = 1024;
@@ -82,6 +84,43 @@ impl ExtractionContext {
 
 pub struct ExtractionResult {
     pub context: ExtractionContext,
+}
+
+/// Extracts every asset of `archive` into the working directory and returns
+/// how many writes failed, each already logged.
+pub async fn extract_archive<R: Read>(
+    archive: &mut tar::Archive<R>,
+    writer_threads: usize,
+    memory_tracker: Arc<MemoryTracker>,
+    stream_threshold: u64,
+) -> Result<usize, io::Error> {
+    info!("pass 1: writing assets, moving them later if their pathname comes after them");
+    let thread_pool = ThreadPool::new(writer_threads, memory_tracker.clone());
+    let result = match process_archive_entries(archive, &thread_pool, stream_threshold) {
+        Ok(result) => result,
+        Err(err) => {
+            // Let queued writes finish so no asset is left half-written.
+            thread_pool.shutdown().await;
+            return Err(err);
+        }
+    };
+    create_folder_structures(&result.context, &thread_pool).await?;
+
+    // Pass 2 moves the files pass 1 wrote, so every pass 1 write must be done.
+    info!("waiting for pass 1 write tasks to complete");
+    let mut failures = thread_pool.shutdown().await;
+
+    if result.context.has_orphaned_work() {
+        info!(
+            "pass 2: moving or deleting {} orphaned assets",
+            result.context.orphaned_count()
+        );
+        let thread_pool = ThreadPool::new(writer_threads, memory_tracker);
+        process_orphaned_assets(result.context, &thread_pool).await?;
+        failures += thread_pool.shutdown().await;
+    }
+
+    Ok(failures)
 }
 
 // Pass 1: Read pathnames/metadata first, then process assets
@@ -726,6 +765,50 @@ TextureImporter:
         let decoder = GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(decoder);
         process_archive_entries(&mut archive, thread_pool, 32 * MB)
+    }
+
+    #[tokio::test]
+    async fn test_every_route_writes_full_content() {
+        const QUEUED: (u64, u64) = (MB, 32 * MB);
+        const QUEUE_FULL: (u64, u64) = (0, 32 * MB);
+        const STREAMED: (u64, u64) = (MB, 1);
+        const PATHNAME_FIRST_DATA: &[u8] = b"pathname came first";
+
+        for (memory_limit, stream_threshold) in [QUEUED, QUEUE_FULL, STREAMED] {
+            let _cwd = TempCwd::new();
+            let package = TestUnityPackageBuilder::new()
+                .add_asset("asset1", "Assets/AssetFirst.txt", TEST_ASSET_DATA)
+                .add_orphaned_pathname("asset2", "Assets/PathnameFirst.txt")
+                .add_orphaned_asset("asset2", PATHNAME_FIRST_DATA)
+                .add_orphaned_asset("lonely", b"no pathname")
+                .add_folder_asset("folder1", "Assets/Empty/")
+                .build();
+            let mut archive = tar::Archive::new(GzDecoder::new(Cursor::new(package)));
+            let memory_tracker = Arc::new(MemoryTracker::new(memory_limit));
+
+            let failures = extract_archive(&mut archive, 2, memory_tracker, stream_threshold)
+                .await
+                .unwrap();
+
+            let route = format!("memory {memory_limit}, threshold {stream_threshold}");
+            assert_eq!(failures, 0, "{route}");
+            assert_eq!(
+                std::fs::read("Assets/AssetFirst.txt").unwrap(),
+                TEST_ASSET_DATA,
+                "{route}"
+            );
+            assert_eq!(
+                std::fs::read("Assets/PathnameFirst.txt").unwrap(),
+                PATHNAME_FIRST_DATA,
+                "{route}"
+            );
+            assert!(Path::new("Assets/Empty").is_dir(), "{route}");
+            let root: Vec<_> = std::fs::read_dir(".")
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(root, ["Assets"], "{route}: orphans left in root");
+        }
     }
 
     #[tokio::test]

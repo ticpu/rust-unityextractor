@@ -1,6 +1,5 @@
 use crate::archive_operations::*;
 use crate::memory_tracker::MemoryTracker;
-use crate::thread_pool::ThreadPool;
 use argparse::{ArgumentParser, IncrBy, Store};
 use bytesize::ByteSize;
 use flate2::read::GzDecoder;
@@ -122,9 +121,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let file = file?;
 
-    // Create memory tracker and thread pool
     let memory_tracker = Arc::new(MemoryTracker::new(config.max_buffer_memory));
-    let thread_pool = ThreadPool::new(config.writer_threads, memory_tracker.clone());
 
     info!(
         "starting {} writer threads with {} memory limit and {} stream threshold",
@@ -133,43 +130,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ByteSize(config.stream_threshold).display().si()
     );
 
-    // Pass 1: Read compressed file sequentially
-    // - Read pathname and metadata and save them in memory
-    // - Read asset, route based on size: large files stream synchronously, small files queue
-    info!("pass 1: processing archive entries");
-    let decoder = GzDecoder::new(&file);
-    let mut archive = tar::Archive::new(decoder);
-    let result = match process_archive_entries(&mut archive, &thread_pool, config.stream_threshold)
-    {
-        Ok(result) => result,
+    let mut archive = tar::Archive::new(GzDecoder::new(&file));
+    let extraction = extract_archive(
+        &mut archive,
+        config.writer_threads,
+        memory_tracker,
+        config.stream_threshold,
+    )
+    .await;
+    let failures = match extraction {
+        Ok(failures) => failures,
         Err(err) => {
-            error!("cannot read archive {}: {}", config.input_path, err);
-            // Let queued writes finish so no asset is left half-written.
-            thread_pool.shutdown().await;
+            error!("cannot extract {}: {}", config.input_path, err);
             std::process::exit(1);
         }
     };
-
-    // Create folder structures for pathnames that are marked as folders
-    create_folder_structures(&result.context, &thread_pool).await?;
-
-    // Pass 2 moves the files pass 1 wrote, so every pass 1 write must be done.
-    info!("waiting for pass 1 write tasks to complete");
-    let mut failures = thread_pool.shutdown().await;
-
-    // Pass 2: Handle orphaned assets
-    // - Iterate the orphaned asset and move them where they belong, creating missing directories as needed
-    // - Show warn!() for assets missing pathname and delete them
-    if result.context.has_orphaned_work() {
-        info!(
-            "pass 2: processing {} orphaned assets",
-            result.context.orphaned_count()
-        );
-        let thread_pool = ThreadPool::new(config.writer_threads, memory_tracker);
-        process_orphaned_assets(result.context, &thread_pool).await?;
-        failures += thread_pool.shutdown().await;
-    }
-
     if failures > 0 {
         error!("{failures} write operations failed, see the warnings above");
         std::process::exit(1);
