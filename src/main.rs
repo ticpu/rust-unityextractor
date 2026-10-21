@@ -17,7 +17,7 @@ mod thread_pool;
 struct Config {
     input_path: String,
     log_level: LevelFilter,
-    max_concurrent_writes: usize,
+    writer_threads: usize,
     max_buffer_memory: u64, // bytes
     stream_threshold: u64,  // bytes
 }
@@ -26,7 +26,6 @@ fn parse_arguments() -> Config {
     let mut verbose = 0;
     let mut quiet = 0;
     let mut input_path = String::new();
-    let mut max_concurrent_writes = 4; // Default to 4 writer threads
     let mut max_buffer_memory_str = "1GB".to_string();
     let mut stream_threshold_str = "32MB".to_string();
     let mut writer_threads = 4;
@@ -42,11 +41,6 @@ fn parse_arguments() -> Config {
         parser
             .refer(&mut verbose)
             .add_option(&["-v"], IncrBy(1), "increase verbosity; up to 3.");
-        parser.refer(&mut max_concurrent_writes).add_option(
-            &["-j", "--jobs"],
-            Store,
-            "max concurrent file writes (default: 4, max: numcpu)",
-        );
         parser.refer(&mut max_buffer_memory_str).add_option(
             &["-m", "--max-memory"],
             Store,
@@ -58,7 +52,7 @@ fn parse_arguments() -> Config {
             "files larger than this size will be streamed (e.g. 32MB, 1GB, default: 32MB)",
         );
         parser.refer(&mut writer_threads).add_option(
-            &["--writer-threads"],
+            &["-j", "--jobs", "--writer-threads"],
             Store,
             "number of writer threads for small files (default: 4, max: numcpu)",
         );
@@ -95,7 +89,6 @@ fn parse_arguments() -> Config {
         eprintln!("Writer threads ({writer_threads}) cannot exceed number of CPUs ({max_cpus})");
         std::process::exit(1);
     }
-    max_concurrent_writes = writer_threads;
 
     let log_level = match verbose - quiet {
         ..=-1 => LevelFilter::Error,
@@ -108,7 +101,7 @@ fn parse_arguments() -> Config {
     Config {
         input_path,
         log_level,
-        max_concurrent_writes,
+        writer_threads,
         max_buffer_memory,
         stream_threshold,
     }
@@ -130,11 +123,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create memory tracker and thread pool
     let memory_tracker = Arc::new(MemoryTracker::new(config.max_buffer_memory));
-    let thread_pool = ThreadPool::new(config.max_concurrent_writes, memory_tracker.clone());
+    let thread_pool = ThreadPool::new(config.writer_threads, memory_tracker.clone());
 
     info!(
         "starting {} writer threads with {}MB memory limit and {}MB stream threshold",
-        config.max_concurrent_writes,
+        config.writer_threads,
         config.max_buffer_memory / (1024 * 1024),
         config.stream_threshold / (1024 * 1024)
     );

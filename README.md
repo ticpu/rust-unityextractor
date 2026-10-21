@@ -23,7 +23,7 @@ Assets are extracted into the current working directory, under their package pat
 | --- | --- | --- |
 | `-v` | | More logging: once for info, twice for debug, three times for trace |
 | `-q` | | Less logging: hide warnings, show errors only |
-| `--writer-threads N` | 4 | Worker threads writing small files, at most the CPU count |
+| `-j`, `--jobs`, `--writer-threads N` | 4 | Worker threads writing small files, at most the CPU count |
 | `-m`, `--max-memory SIZE` | 1GB | Memory allowed for buffered files waiting to be written |
 | `--stream-threshold SIZE` | 32MB | Files at least this large are streamed straight to disk |
 

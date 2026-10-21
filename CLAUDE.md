@@ -22,8 +22,7 @@ The tool supports verbose logging:
 - `-q` - Hide warnings (quiet mode)
 
 ### Concurrency and Memory Control
-- `-j/--jobs N` - Max concurrent file writes (default: 4, max: numcpu)
-- `--writer-threads N` - Number of writer threads for small files (default: 4, max: numcpu)
+- `-j/--jobs/--writer-threads N` - Number of writer threads for small files (default: 4, max: numcpu)
 - `-m/--max-memory SIZE` - Max buffer memory (e.g. 512MB, 2GB, default: 1GB)
 - `--stream-threshold SIZE` - Files larger than this size will be streamed (e.g. 32MB, 1GB, default: 32MB)
 
