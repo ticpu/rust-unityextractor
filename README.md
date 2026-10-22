@@ -6,6 +6,19 @@ Extracts the assets of a `.unitypackage` file to disk without Unity. A Unity pac
 
 Each [release](https://github.com/ticpu/rust-unityextractor/releases) has static Linux binaries for x86_64 and aarch64, which run on any distribution, and a Windows x86_64 exe. Every asset comes with a GPG signature, and `SHA256SUMS` lists their checksums.
 
+On Debian and Ubuntu the package comes from the [apt.ticpu.net](https://github.com/ticpu/apt-ticpu-net) archive. It is built for amd64 and arm64, needs no other package, and the same `.deb` files are attached to each release:
+
+```sh
+curl -fsSLO https://apt.ticpu.net/ticpu-archive-keyring.deb
+sudo dpkg -i ticpu-archive-keyring.deb
+sudo apt-get update
+sudo apt-get install rust-unityextractor
+```
+
+The keyring package installs the archive key and a sources entry for your release; the archive's README covers setting it up by hand and what else it carries.
+
+On Arch Linux, the AUR has `rust-unityextractor`, built from source, and `rust-unityextractor-bin`, which installs the signed static binary.
+
 To build from source, `cargo build --release` puts the binary in target/release/. `./build.sh` cross-compiles every release target into dist/ inside a container, with podman or docker.
 
 ## Usage
