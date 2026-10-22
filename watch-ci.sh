@@ -8,6 +8,10 @@
 # is not necessarily the commit being released. `gh run watch` also exits 0 on a
 # failed run unless given --exit-status.
 #
+# A tag points at a commit that already has its branch run, and both runs match
+# the SHA, so for a tag the run is also selected by head branch, which for a tag
+# push is the tag name. Without that, the finished branch run answers instantly.
+#
 # A run does not exist the instant a push returns, so the id is polled for.
 
 set -euo pipefail
@@ -21,10 +25,15 @@ workflow="${2:-build.yml}"
 # which no run matches; the release tag is always annotated.
 sha="$(git rev-parse "${ref}^{commit}")"
 
+branch_filter=()
+if git rev-parse -q --verify "refs/tags/$ref" >/dev/null; then
+	branch_filter=(--branch "$ref")
+fi
+
 run_id=""
 waited=0
 while [ -z "$run_id" ]; do
-	run_id="$(gh run list --workflow "$workflow" --commit "$sha" --limit 1 \
+	run_id="$(gh run list --workflow "$workflow" --commit "$sha" "${branch_filter[@]}" --limit 1 \
 		--json databaseId --jq '.[0].databaseId // empty')"
 	[ -n "$run_id" ] && break
 	if [ "$waited" -ge "$POLL_TIMEOUT" ]; then
